@@ -34,7 +34,7 @@ module Itamae
       errors = Schash::Validator.new(&block).validate(@mash)
       unless errors.empty?
         errors.each do |error|
-          Logger.error "'#{error.position.join('->')}' #{error.message}"
+          Itamae.logger.error "'#{error.position.join('->')}' #{error.message}"
         end
         raise ValidationError
       end
@@ -61,7 +61,12 @@ module Itamae
     end
 
     def fetch_inventory_value(key)
-      @backend.host_inventory[key]
+      value = @backend.host_inventory[key]
+      if value.is_a?(Hash)
+        value = Hashie::Mash.new(value)
+      end
+
+      value
     rescue NotImplementedError, NameError
       nil
     end

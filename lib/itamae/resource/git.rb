@@ -9,6 +9,8 @@ module Itamae
       define_attribute :destination, type: String, default_name: true
       define_attribute :repository, type: String, required: true
       define_attribute :revision, type: String
+      define_attribute :recursive, type: [TrueClass, FalseClass], default: false
+      define_attribute :depth, type: Integer
 
       def pre_action
         case @current_action
@@ -26,16 +28,19 @@ module Itamae
 
         new_repository = false
 
-        if run_specinfra(:check_file_is_directory, attributes.destination)
-          run_command_in_repo(['git', 'fetch', 'origin'])
-        else
-          run_command(['git', 'clone', attributes.repository, attributes.destination])
+        if check_empty_dir
+          cmd = ['git', 'clone']
+          cmd << '--recursive' if attributes.recursive
+          cmd += ['--depth', attributes.depth.to_s] if attributes.depth
+          cmd << attributes.repository << attributes.destination
+          run_command(cmd)
           new_repository = true
         end
 
         target = if attributes.revision
                    get_revision(attributes.revision)
                  else
+                   fetch_origin!
                    run_command_in_repo("git ls-remote origin HEAD | cut -f1").stdout.strip
                  end
 
@@ -48,6 +53,7 @@ module Itamae
             deploy_old_created = true
           end
 
+          fetch_origin!
           run_command_in_repo(["git", "checkout", target, "-b", DEPLOY_BRANCH])
 
           if deploy_old_created
@@ -63,8 +69,16 @@ module Itamae
         end
       end
 
+      def check_empty_dir
+        run_command("test -z \"$(ls -A #{shell_escape(attributes.destination)})\"", error: false).success?
+      end
+
       def run_command_in_repo(*args)
-        run_command(*args, cwd: attributes.destination)
+        unless args.last.is_a?(Hash)
+          args << {}
+        end
+        args.last[:cwd] = attributes.destination
+        run_command(*args)
       end
 
       def current_branch
@@ -72,7 +86,17 @@ module Itamae
       end
 
       def get_revision(branch)
-        run_command_in_repo("git rev-list #{shell_escape(branch)} | head -n1").stdout.strip
+        result = run_command_in_repo("git rev-list #{shell_escape(branch)}", error: false)
+        unless result.exit_status == 0
+          fetch_origin!
+        end
+        run_command_in_repo("git rev-list #{shell_escape(branch)}").stdout.lines.first.strip
+      end
+
+      def fetch_origin!
+        return if @origin_fetched
+        @origin_fetched = true
+        run_command_in_repo(['git', 'fetch', 'origin'])
       end
     end
   end

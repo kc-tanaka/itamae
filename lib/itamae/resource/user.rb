@@ -11,11 +11,17 @@ module Itamae
       define_attribute :system_user, type: [TrueClass, FalseClass]
       define_attribute :uid, type: Integer
       define_attribute :shell, type: String
+      define_attribute :create_home, type: [TrueClass, FalseClass], default: false
 
       def pre_action
         case @current_action
         when :create
           attributes.exist = true
+        end
+
+        if attributes.gid.is_a?(String)
+          # convert name to gid
+          attributes.gid = run_specinfra(:get_group_gid, attributes.gid).stdout.to_i
         end
       end
 
@@ -65,6 +71,7 @@ module Itamae
             system_user:    attributes.system_user,
             uid:            attributes.uid,
             shell:          attributes.shell,
+            create_home:    attributes.create_home,
           }
 
           run_specinfra(:add_user, attributes.username, options)

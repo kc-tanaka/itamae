@@ -6,6 +6,7 @@ require 'itamae/resource/remote_directory'
 require 'itamae/resource/remote_file'
 require 'itamae/resource/directory'
 require 'itamae/resource/template'
+require 'itamae/resource/http_request'
 require 'itamae/resource/execute'
 require 'itamae/resource/service'
 require 'itamae/resource/link'
@@ -34,15 +35,24 @@ module Itamae
           begin
             ::Itamae::Plugin::Resource.const_get(to_camel_case(method.to_s))
           rescue NameError
-            raise Error, "#{method} resource is missing."
+            autoload_plugin_resource(method)
           end
+        end
+      end
+
+      def autoload_plugin_resource(method)
+        begin
+          require "itamae/plugin/resource/#{method}"
+          ::Itamae::Plugin::Resource.const_get(to_camel_case(method.to_s))
+        rescue LoadError, NameError
+          raise Error, "#{method} resource is missing."
         end
       end
 
       def define_resource(name, klass)
         class_name = to_camel_case(name.to_s)
         if Resource.const_defined?(class_name)
-          Logger.warn "Redefine class. (#{class_name})"
+          Itamae.logger.warn "Redefine class. (#{class_name})"
           return
         end
 

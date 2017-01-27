@@ -5,13 +5,15 @@ module Itamae
     class File < Base
       define_attribute :action, default: :create
       define_attribute :path, type: String, default_name: true
-      define_attribute :content, type: String, default: ''
+      define_attribute :content, type: String, default: nil
       define_attribute :mode, type: String
       define_attribute :owner, type: String
       define_attribute :group, type: String
       define_attribute :block, type: Proc, default: proc {}
 
       def pre_action
+        current.exist = run_specinfra(:check_file_is_file, attributes.path)
+
         case @current_action
         when :create
           attributes.exist = true
@@ -20,17 +22,19 @@ module Itamae
         when :edit
           attributes.exist = true
 
-          content = backend.receive_file(attributes.path)
-          attributes.block.call(content)
-          attributes.content = content
+          if !runner.dry_run? || current.exist
+            content = backend.receive_file(attributes.path)
+            attributes.block.call(content)
+            attributes.content = content
+          end
         end
 
         send_tempfile
+        compare_file
       end
 
       def set_current_attributes
-        current.exist = run_specinfra(:check_file_is_file, attributes.path)
-
+        current.modified = false
         if current.exist
           current.mode = run_specinfra(:get_file_mode, attributes.path).stdout.chomp
           current.owner = run_specinfra(:get_file_owner_user, attributes.path).stdout.chomp
@@ -48,30 +52,29 @@ module Itamae
 
         super
 
-        if current.exist
-          show_file_diff
+        if @temppath && @current_action != :delete
+          show_content_diff
         end
       end
 
       def action_create(options)
-        if attributes.mode
-          run_specinfra(:change_file_mode, @temppath, attributes.mode)
+        if !current.exist && !@temppath
+          run_command(["touch", attributes.path])
         end
+
+        change_target = attributes.modified ? @temppath : attributes.path
+
         if attributes.owner || attributes.group
-          run_specinfra(:change_file_owner, @temppath, attributes.owner, attributes.group)
+          run_specinfra(:change_file_owner, change_target, attributes.owner, attributes.group)
         end
 
-        if run_specinfra(:check_file_is_file, attributes.path)
-          unless check_command(["diff", "-q", @temppath, attributes.path])
-            # the file is modified
-            updated!
-          end
-        else
-          # new file
-          updated!
+        if attributes.mode
+          run_specinfra(:change_file_mode, change_target, attributes.mode)
         end
 
-        run_specinfra(:move_file, @temppath, attributes.path)
+        if attributes.modified
+          run_specinfra(:move_file, @temppath, attributes.path)
+        end
       end
 
       def action_delete(options)
@@ -81,20 +84,54 @@ module Itamae
       end
 
       def action_edit(options)
-        run_command(['chmod', '--reference', attributes.path, @temppath])
-        run_command(['chown', '--reference', attributes.path, @temppath])
-        run_specinfra(:move_file, @temppath, attributes.path)
+        change_target = attributes.modified ? @temppath : attributes.path
+
+        if attributes.owner || attributes.group || attributes.modified
+          owner = attributes.owner || run_specinfra(:get_file_owner_user, attributes.path).stdout.chomp
+          group = attributes.group || run_specinfra(:get_file_owner_group, attributes.path).stdout.chomp
+          run_specinfra(:change_file_owner, change_target, owner, group)
+        end
+
+        if attributes.mode || attributes.modified
+          mode = attributes.mode || run_specinfra(:get_file_mode, attributes.path).stdout.chomp
+          run_specinfra(:change_file_mode, change_target, mode)
+        end
+
+        if attributes.modified
+          run_specinfra(:move_file, @temppath, attributes.path)
+        end
       end
 
       private
 
-      def show_file_diff
-        diff = run_command(["diff", "-u", attributes.path, @temppath], error: false)
-        if diff.exit_status == 0
-          # no change
-          Logger.debug "file content will not change"
+      def compare_to
+        if current.exist
+          attributes.path
         else
-          Logger.info "diff:"
+          '/dev/null'
+        end
+      end
+
+      def compare_file
+        attributes.modified = false
+        unless @temppath
+          return
+        end
+
+        case run_command(["diff", "-q", compare_to, @temppath], error: false).exit_status
+        when 1
+          # diff found
+          attributes.modified = true
+        when 2
+          # error
+          raise Itamae::Backend::CommandExecutionError, "diff command exited with 2"
+        end
+      end
+
+      def show_content_diff
+        if attributes.modified
+          Itamae.logger.info "diff:"
+          diff = run_command(["diff", "-u", compare_to, @temppath], error: false)
           diff.stdout.each_line do |line|
             color = if line.start_with?('+')
                       :green
@@ -103,10 +140,14 @@ module Itamae
                     else
                       :clear
                     end
-            Logger.formatter.color(color) do
-              Logger.info line.chomp
+            Itamae.logger.color(color) do
+              Itamae.logger.info line.chomp
             end
           end
+          runner.handler.event(:file_content_changed, diff: diff.stdout)
+        else
+          # no change
+          Itamae.logger.debug "file content will not change"
         end
       end
 
@@ -116,6 +157,11 @@ module Itamae
       end
 
       def send_tempfile
+        if !attributes.content && !content_file
+          @temppath = nil
+          return
+        end
+
         begin
           src = if content_file
                   content_file
@@ -127,7 +173,18 @@ module Itamae
                 end
 
           @temppath = ::File.join(runner.tmpdir, Time.now.to_f.to_s)
-          backend.send_file(src, @temppath)
+
+          if backend.is_a?(Itamae::Backend::Docker)
+            run_command(["mkdir", @temppath])
+            backend.send_file(src, @temppath)
+            @temppath = ::File.join(@temppath, ::File.basename(src))
+          else
+            run_command(["touch", @temppath])
+            run_specinfra(:change_file_mode, @temppath, '0600')
+            backend.send_file(src, @temppath)
+          end
+
+          run_specinfra(:change_file_mode, @temppath, '0600')
         ensure
           f.unlink if f
         end
@@ -135,4 +192,3 @@ module Itamae
     end
   end
 end
-

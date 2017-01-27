@@ -100,20 +100,25 @@ end
 describe TestResource do
   subject(:resource) { described_class.new(recipe, "name") }
 
-  let(:commands) { double(:commands) }
+  let(:handler) { Itamae::HandlerProxy.new }
   let(:runner) do
-    double(:runner)
+    instance_double(Itamae::Runner).tap do |r|
+      allow(r).to receive(:dry_run?).and_return(false)
+      allow(r).to receive(:handler).and_return(handler)
+    end
   end
   let(:recipe) do
-    double(:recipe).tap do |r|
-      r.stub(:runner).and_return(runner)
+    instance_double(Itamae::Recipe).tap do |r|
+      allow(r).to receive(:runner).and_return(runner)
     end
   end
 
   describe "#run" do
     before do
       subject.attributes.action = :name
+      allow(Itamae::Logger).to receive(:debug)  # suppress logger output
     end
+
     it "executes <ACTION_NAME>_action method" do
       expect(subject).to receive(:action_name)
       subject.run

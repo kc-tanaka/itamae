@@ -53,36 +53,31 @@ module Itamae
       end.flatten
     end
 
-    def run(options)
+    def run
       self.each do |resource|
-        case resource
-        when Resource::Base
-          resource.run(nil, dry_run: options[:dry_run])
-        when Recipe
-          resource.run(options)
-        end
+        resource.run
       end
     end
 
     # returns dependencies graph in DOT
-    def deps_in_dot
+    def dependency_in_dot
       result = ""
       result << "digraph recipes {\n"
       result << "  rankdir=LR;\n"
-      result << _deps_in_dot
+      result << _dependency_in_dot
       result << "}"
 
       result
     end
 
-    def _deps_in_dot
+    def _dependency_in_dot
       result = ""
 
       recipes(recursive: false).each do |recipe|
         recipe.children.recipes(recursive: false).each do |child_recipe|
           result << %{  "#{recipe.path}" -> "#{child_recipe.path}";\n}
         end
-        result << recipe.children._deps_in_dot
+        result << recipe.children._dependency_in_dot
       end
 
       result

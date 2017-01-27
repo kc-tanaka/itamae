@@ -2,17 +2,41 @@ require 'spec_helper'
 
 module Itamae
   describe Logger do
-    let(:io) { StringIO.new }
+    describe "#debug" do
+      context "`msg` is a String" do
+        it "indents the message" do
+          expect_any_instance_of(::Logger).to receive(:debug).with("  msg")
+          Itamae.logger.with_indent do
+            Itamae.logger.debug("msg")
+          end
+        end
+      end
 
-    before do
-      Logger.log_device = io
-    end
+      context "`msg` is an Exception" do
+        let(:msg) { ::Exception.new("error") }
 
-    [:fatal, :error, :warn, :info, :debug].each do |level|
-      describe "##{level}" do
-        it "puts #{level} log" do
-          Logger.public_send(level, "CONTENT")
-          expect(io.string).to include('CONTENT')
+        before do
+          allow(msg).to receive(:backtrace) { %w!frame1 frame2! }
+        end
+
+        it "indents the error message and the backtrace" do
+          expect_any_instance_of(::Logger).to receive(:debug).with(<<-MSG.rstrip)
+  error (Exception)
+  frame1
+  frame2
+          MSG
+          Itamae.logger.with_indent do
+            Itamae.logger.debug(msg)
+          end
+        end
+      end
+
+      context "`msg` is an Array" do
+        it "indents the message" do
+          expect_any_instance_of(::Logger).to receive(:debug).with("  []")
+          Itamae.logger.with_indent do
+            Itamae.logger.debug([])
+          end
         end
       end
     end

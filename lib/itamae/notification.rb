@@ -10,8 +10,8 @@ module Itamae
       runner.children.find_resource_by_description(target_resource_desc)
     end
 
-    def run(options)
-      action_resource.run(action, options)
+    def run
+      action_resource.run(action)
     end
 
     def action_resource
@@ -32,7 +32,7 @@ module Itamae
 
     def validate!
       unless [:delay, :delayed, :immediately].include?(timing)
-        Logger.error "'#{timing}' is not valid notification timing. (Valid option is delayed or immediately)"
+        Itamae.logger.error "'#{timing}' is not valid notification timing. (Valid option is delayed or immediately)"
         abort
       end
     end

@@ -60,6 +60,10 @@ module Itamae
           @resource.recipe.runner.node
         end
 
+        def run_command(*args)
+          @resource.recipe.runner.backend.run_command(*args)
+        end
+
         # Experimental
         def verify(command)
           @verify_commands << command
@@ -87,6 +91,7 @@ module Itamae
 
       define_attribute :action, type: [Symbol, Array], required: true
       define_attribute :user, type: String
+      define_attribute :cwd, type: String
 
       attr_reader :recipe
       attr_reader :resource_name
@@ -115,79 +120,95 @@ module Itamae
         process_attributes
       end
 
-      def run(specific_action = nil, options = {})
-        Logger.debug "#{resource_type}[#{resource_name}]"
+      def run(specific_action = nil)
+        runner.handler.event(:resource, resource_type: resource_type, resource_name: resource_name) do
+          Itamae.logger.debug "#{resource_type}[#{resource_name}]"
 
-        Logger.formatter.with_indent_if(Logger.debug?) do
-          if do_not_run_because_of_only_if?
-            Logger.debug "#{resource_type}[#{resource_name}] Execution skipped because of only_if attribute"
-            return
-          elsif do_not_run_because_of_not_if?
-            Logger.debug "#{resource_type}[#{resource_name}] Execution skipped because of not_if attribute"
-            return
+          Itamae.logger.with_indent_if(Itamae.logger.debug?) do
+            if do_not_run_because_of_only_if?
+              Itamae.logger.debug "#{resource_type}[#{resource_name}] Execution skipped because of only_if attribute"
+              return
+            elsif do_not_run_because_of_not_if?
+              Itamae.logger.debug "#{resource_type}[#{resource_name}] Execution skipped because of not_if attribute"
+              return
+            end
+
+            [specific_action || attributes.action].flatten.each do |action|
+              run_action(action)
+            end
+
+            verify unless runner.dry_run?
+            if updated?
+              runner.diff_found!
+              notify
+              runner.handler.event(:resource_updated)
+            end
           end
 
-          [specific_action || attributes.action].flatten.each do |action|
-            run_action(action, options)
-          end
-
-          verify unless options[:dry_run]
-          notify(options) if updated?
+          @updated = false
         end
-
-        @updated = false
       rescue Backend::CommandExecutionError
-        Logger.error "#{resource_type}[#{resource_name}] Failed."
+        Itamae.logger.error "#{resource_type}[#{resource_name}] Failed."
         exit 2
       end
 
-      def action_nothing(options)
+      def action_nothing
         # do nothing
       end
 
       def resource_type
-        humps = []
-        self.class.name.split("::").last.each_char do |c|
-          if "A" <= c && c <= "Z"
-            humps << c.downcase
-          else
-            humps.last << c
-          end
-        end
-        humps.join('_')
+        self.class.name.split("::").last.scan(/[A-Z][^A-Z]+/).map(&:downcase).join('_')
       end
 
       private
 
       alias_method :current, :current_attributes
 
-      def run_action(action, options)
-        @current_action = action
+      def run_action(action)
+        runner.handler.event(:action, action: action) do
+          original_attributes = @attributes # preserve and restore later
+          @current_action = action
 
-        clear_current_attributes
+          clear_current_attributes
 
-        Logger.debug "#{resource_type}[#{resource_name}] action: #{action}"
+          Itamae.logger.debug "#{resource_type}[#{resource_name}] action: #{action}"
 
-        return if action == :nothing
+          return if action == :nothing
 
-        Logger.formatter.with_indent_if(Logger.debug?) do
-          Logger.debug "(in pre_action)"
-          pre_action
+          Itamae.logger.with_indent_if(Itamae.logger.debug?) do
+            Itamae.logger.debug "(in pre_action)"
+            pre_action
 
-          Logger.debug "(in set_current_attributes)"
-          set_current_attributes
+            Itamae.logger.debug "(in set_current_attributes)"
+            set_current_attributes
 
-          Logger.debug "(in show_differences)"
-          show_differences
+            Itamae.logger.debug "(in show_differences)"
+            show_differences
 
-          unless options[:dry_run]
-            public_send("action_#{action}".to_sym, options)
+            method_name = "action_#{action}"
+            if runner.dry_run?
+              unless respond_to?(method_name)
+                Itamae.logger.error "action #{action.inspect} is unavailable"
+              end
+            else
+              args = [method_name]
+              if method(method_name).arity == 1
+                # for plugin compatibility
+                args << runner.options
+              end
+
+              public_send(*args)
+            end
+
+            if different?
+              updated!
+              runner.handler.event(:attribute_changed, from: @current_attributes, to: @attributes)
+            end
           end
 
-          updated! if different?
+          @current_action = nil
+          @attributes = original_attributes
         end
-
-        @current_action = nil
       end
 
       def clear_current_attributes
@@ -216,14 +237,14 @@ module Itamae
           if current_value.nil? && value.nil?
             # ignore
           elsif current_value.nil? && !value.nil?
-            Logger.formatter.color :green do
-              Logger.info "#{resource_type}[#{resource_name}] #{key} will be '#{value}'"
+            Itamae.logger.color :green do
+              Itamae.logger.info "#{resource_type}[#{resource_name}] #{key} will be '#{value}'"
             end
           elsif current_value == value || value.nil?
-            Logger.debug "#{resource_type}[#{resource_name}] #{key} will not change (current value is '#{current_value}')"
+            Itamae.logger.debug "#{resource_type}[#{resource_name}] #{key} will not change (current value is '#{current_value}')"
           else
-            Logger.formatter.color :green do
-              Logger.info "#{resource_type}[#{resource_name}] #{key} will change from '#{current_value}' to '#{value}'"
+            Itamae.logger.color :green do
+              Itamae.logger.info "#{resource_type}[#{resource_name}] #{key} will change from '#{current_value}' to '#{value}'"
             end
           end
         end
@@ -277,6 +298,7 @@ module Itamae
         end
 
         args.last[:user] ||= attributes.user
+        args.last[:cwd]  ||= attributes.cwd
 
         backend.run_command(*args)
       end
@@ -302,11 +324,11 @@ module Itamae
       end
 
       def shell_escape(str)
-        Shellwords.escape(str)
+        str.shellescape
       end
 
       def updated!
-        Logger.debug "This resource is updated."
+        Itamae.logger.debug "This resource is updated."
         @updated = true
       end
 
@@ -314,8 +336,8 @@ module Itamae
         @updated
       end
 
-      def notify(options)
-        (notifications + recipe.children.subscribing(self)).each do |notification|
+      def notify
+        (notifications + runner.children.subscribing(self)).each do |notification|
           message = "Notifying #{notification.action} to #{notification.action_resource.resource_type} resource '#{notification.action_resource.resource_name}'"
 
           if notification.delayed?
@@ -324,16 +346,16 @@ module Itamae
             message << " (immediately)"
           end
 
-          Logger.info message
+          Itamae.logger.info message
 
           if notification.instance_of?(Subscription)
-            Logger.info "(because it subscribes this resource)"
+            Itamae.logger.info "(because it subscribes this resource)"
           end
 
           if notification.delayed?
             @recipe.delayed_notifications << notification
           elsif notification.immediately?
-            notification.run(options)
+            notification.run
           end
         end
       end
@@ -341,8 +363,8 @@ module Itamae
       def verify
         return if @verify_commands.empty?
 
-        Logger.info "Verifying..."
-        Logger.formatter.with_indent do
+        Itamae.logger.info "Verifying..."
+        Itamae.logger.with_indent do
           @verify_commands.each do |command|
             run_command(command)
           end
@@ -351,4 +373,3 @@ module Itamae
     end
   end
 end
-

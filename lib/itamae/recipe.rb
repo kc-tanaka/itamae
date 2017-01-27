@@ -11,17 +11,34 @@ module Itamae
 
     class << self
       def find_recipe_in_gem(recipe)
-        target = recipe.gsub('::', '/')
-        target += '.rb' if target !~ /\.rb$/
-        plugin_name = recipe.split('::')[0]
+        plugin_name, recipe_file = recipe.split('::', 2)
+        recipe_file = recipe_file.gsub("::", "/") if recipe_file
 
+        gem_name = "itamae-plugin-recipe-#{plugin_name}"
+        begin
+          gem gem_name
+        rescue LoadError
+        end
         spec = Gem.loaded_specs.values.find do |spec|
-          spec.name == "itamae-plugin-recipe-#{plugin_name}"
+          spec.name == gem_name
         end
 
         return nil unless spec
 
-        File.join(spec.lib_dirs_glob, 'itamae', 'plugin', 'recipe', target)
+        candidate_files = []
+        if recipe_file
+          recipe_file += '.rb' unless recipe_file.end_with?('.rb')
+          candidate_files << "#{plugin_name}/#{recipe_file}"
+        else
+          candidate_files << "#{plugin_name}/default.rb"
+          candidate_files << "#{plugin_name}.rb"
+        end
+
+        candidate_files.map do |file|
+          File.join(spec.lib_dirs_glob, 'itamae', 'plugin', 'recipe', file)
+        end.find do |path|
+          File.exist?(path)
+        end
       end
     end
 
@@ -41,29 +58,31 @@ module Itamae
       context.instance_eval(File.read(path), path, 1)
     end
 
-    def run(options = {})
+    def run
       show_banner
 
-      Logger.formatter.with_indent do
-        @children.run(options)
-        run_delayed_notifications(options)
+      @runner.handler.event(:recipe, path: @path) do
+        Itamae.logger.with_indent do
+          @children.run
+          run_delayed_notifications
+        end
       end
     end
 
     private
 
-    def run_delayed_notifications(options)
+    def run_delayed_notifications
       @delayed_notifications.uniq! do |notification|
         [notification.action, notification.action_resource]
       end
 
       while notification = @delayed_notifications.shift
-        notification.run(options)
+        notification.run
       end
     end
 
     def show_banner
-      Logger.info "Recipe: #{@path}"
+      Itamae.logger.info "Recipe: #{@path}"
     end
 
     class EvalContext
@@ -101,10 +120,10 @@ module Itamae
       end
 
       def include_recipe(target)
-        candidate_paths = [
-          ::File.expand_path(target, File.dirname(@recipe.path)),
-          Recipe.find_recipe_in_gem(target),
-        ].compact
+        expanded_path = ::File.expand_path(target, File.dirname(@recipe.path))
+        expanded_path = ::File.join(expanded_path, 'default.rb') if ::Dir.exist?(expanded_path)
+        expanded_path.concat('.rb') unless expanded_path.end_with?('.rb')
+        candidate_paths = [expanded_path, Recipe.find_recipe_in_gem(target)].compact
         path = candidate_paths.find {|path| File.exist?(path) }
 
         unless path
@@ -112,7 +131,7 @@ module Itamae
         end
 
         if runner.children.find_recipe_by_path(path)
-          Logger.debug "Recipe, #{path}, is skipped because it is already included"
+          Itamae.logger.debug "Recipe, #{path}, is skipped because it is already included"
           return
         end
 
@@ -128,6 +147,10 @@ module Itamae
       def runner
         @recipe.runner
       end
+
+      def run_command(*args)
+        runner.backend.run_command(*args)
+      end
     end
 
     class RecipeFromDefinition < Recipe
@@ -141,7 +164,7 @@ module Itamae
       private
 
       def show_banner
-        Logger.debug "#{@definition.resource_type}[#{@definition.resource_name}]"
+        Itamae.logger.debug "#{@definition.resource_type}[#{@definition.resource_name}]"
       end
     end
   end
